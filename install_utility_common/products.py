@@ -24,14 +24,59 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 import os
 import subprocess
+import warnings
 
+from kubernetes.client import CoreV1Api
 from kubernetes.client.rest import ApiException
+from kubernetes.config import load_kube_config, ConfigException
+from nexusctl import DockerApi, DockerClient, NexusApi, NexusClient
+from nexusctl.common import DEFAULT_DOCKER_REGISTRY_API_BASE_URL, DEFAULT_NEXUS_API_BASE_URL
 from urllib3.exceptions import MaxRetryError
 from urllib.error import HTTPError
-from yaml import safe_load, YAMLError
+from yaml import safe_load, YAMLError, YAMLLoadWarning
 
 
-COMPONENT_VERSIONS_PRODUCT_MAP_KEY = 'component_versions'
+from install_utility_common.constants import (
+    COMPONENT_DOCKER_KEY,
+    COMPONENT_REPOS_KEY,
+    COMPONENT_VERSIONS_PRODUCT_MAP_KEY,
+    PRODUCT_CATALOG_CONFIG_MAP_NAME,
+    PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE
+)
+
+
+def uninstall_docker_image(docker_image_name, docker_image_version, docker_api):
+    """Remove a Docker image.
+
+    It is not recommended to call this function directly, instead use
+    ProductCatalog.uninstall_product_docker_images to check that the image
+    is not in use by another product.
+
+    Args:
+        docker_image_name (str): The name of the Docker image to uninstall.
+        docker_image_version (str): The version of the Docker image to uninstall.
+        docker_api (DockerApi): The nexusctl Docker API to interface with
+            the Docker registry.
+
+    Returns:
+        None
+
+    Raises:
+        ProductInstallException: If an error occurred removing the image.
+    """
+    docker_image_short_name = f'{docker_image_name}:{docker_image_version}'
+    try:
+        docker_api.delete_image(
+            docker_image_name, docker_image_version
+        )
+        print(f'Removed Docker image {docker_image_short_name}')
+    except HTTPError as err:
+        if err.code == 404:
+            print(f'{docker_image_short_name} has already been removed.')
+        else:
+            raise ProductInstallException(
+                f'Failed to remove image {docker_image_short_name}: {err}'
+            )
 
 
 class ProductInstallException(Exception):
@@ -48,22 +93,44 @@ class ProductCatalog:
         products ([InstalledProductVersion]): A list of installed product
             versions.
     """
-    def __init__(self, name, namespace, k8s_api):
+    @staticmethod
+    def _get_k8s_api():
+        """Load a Kubernetes CoreV1Api and return it.
+
+        Returns:
+            CoreV1Api: The Kubernetes API.
+
+        Raises:
+            ProductInstallException: if there was an error loading the
+                Kubernetes configuration.
+        """
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=YAMLLoadWarning)
+                load_kube_config()
+            return CoreV1Api()
+        except ConfigException as err:
+            raise ProductInstallException(f'Unable to load kubernetes configuration: {err}.')
+
+    def __init__(self, name=PRODUCT_CATALOG_CONFIG_MAP_NAME, namespace=PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE,
+                 nexus_url=DEFAULT_NEXUS_API_BASE_URL, docker_url=DEFAULT_DOCKER_REGISTRY_API_BASE_URL):
         """Create the ProductCatalog object.
 
         Args:
             name (str): The name of the product catalog Kubernetes config map.
             namespace (str): The namespace of the product catalog Kubernetes
                 config map.
-            k8s_api (CoreV1Api): The Kubernetes API for reading the config map.
 
         Raises:
             ProductInstallException: if reading the config map failed.
         """
         self.name = name
         self.namespace = namespace
+        self.k8s_client = self._get_k8s_api()
+        self.docker_api = DockerApi(DockerClient(docker_url))
+        self.nexus_api = NexusApi(NexusClient(nexus_url))
         try:
-            config_map = k8s_api.read_namespaced_config_map(name, namespace)
+            config_map = self.k8s_client.read_namespaced_config_map(name, namespace)
         except MaxRetryError as err:
             raise ProductInstallException(
                 f'Unable to connect to Kubernetes to read {namespace}/{name} ConfigMap: {err}'
@@ -119,7 +186,7 @@ class ProductCatalog:
 
         return matching_products[0]
 
-    def remove_product_docker_images(self, name, version, docker_api):
+    def remove_product_docker_images(self, name, version):
         """Remove a product's Docker images.
 
         This function will only remove images that are not used by another
@@ -128,11 +195,12 @@ class ProductCatalog:
         Args:
             name (str): The name of the product for which to remove docker images.
             version (str): The version of the product for which to remove docker images.
-            docker_api (DockerApi): The nexusctl Docker API to interface with
-                the Docker registry.
 
         Returns:
             None
+
+        Raises:
+            ProductInstallException: If an error occurred removing an image.
         """
         product = self.get_product(name, version)
 
@@ -142,6 +210,7 @@ class ProductCatalog:
             if p.version != product.version or p.name != product.name
         ]
 
+        errors = False
         # For each image to remove, check if it is shared by any other products.
         for image_name, image_version in images_to_remove:
             other_products_with_same_docker_image = [
@@ -156,7 +225,53 @@ class ProductCatalog:
                       f'used by the following other product versions: '
                       f'{", ".join(str(p) for p in other_products_with_same_docker_image)}')
             else:
-                product.uninstall_docker_image(image_name, image_version, docker_api)
+                try:
+                    uninstall_docker_image(image_name, image_version, self.docker_api)
+                except ProductInstallException as err:
+                    print(f'Failed to remove {image_name}:{image_version}: {err}')
+                    errors = True
+
+        if errors:
+            raise ProductInstallException(f'One or more errors occurred removing '
+                                          f'Docker images for {name} {version}.')
+
+    def activate_product_hosted_repos(self, name, version):
+        """Activate a product's hosted repositories.
+
+        Args:
+            name (str): The name of the product for which to activate
+                repositories.
+            version (str): The version of the product for which to activate
+                repositories.
+
+        Returns:
+            None
+
+        Raises:
+            ProductInstallException: If an error occurred activating
+                repositories.
+        """
+        product_to_activate = self.get_product(name, version)
+        product_to_activate.activate_hosted_repos_in_group(self.nexus_api)
+
+    def uninstall_product_hosted_repos(self, name, version):
+        """Uninstall a product's hosted repositories.
+
+        Args:
+            name (str): The name of the product for which to uninstall
+                repositories.
+            version (str): The version of the product for which to uninstall
+                repositories.
+
+        Returns:
+            None
+
+        Raises:
+            ProductInstallException: If an error occurred uninstalling
+                repositories.
+        """
+        product_to_uninstall = self.get_product(name, version)
+        product_to_uninstall.uninstall_hosted_repos(self.nexus_api)
 
     def remove_product_entry(self, name, version):
         """Remove this product version's entry from the product catalog.
@@ -222,11 +337,11 @@ class InstalledProductVersion:
         # If there is no 'docker' key under the component data, assume that there
         # is a single docker image named cray/cray-PRODUCT whose version is the
         # value of the PRODUCT key under component_versions.
-        if 'docker' not in component_data:
+        if COMPONENT_DOCKER_KEY not in component_data:
             return [(self._deprecated_docker_image_name, self._deprecated_docker_image_version)]
 
         return [(component['name'], component['version'])
-                for component in component_data.get('docker') or []]
+                for component in component_data.get(COMPONENT_DOCKER_KEY) or []]
 
     @property
     def _deprecated_docker_image_version(self):
@@ -271,68 +386,31 @@ class InstalledProductVersion:
         """
         return f'cray/cray-{self.name}'
 
-    def get_group_repo_name(self, dist):
-        """Get the name of this product's 'group' repository, i.e. NAME-DIST
+    @property
+    def group_repositories(self):
+        """[dict]: Group-type repository data dictionaries for this product version."""
+        component_data = self.data.get(COMPONENT_VERSIONS_PRODUCT_MAP_KEY)
+        repositories = component_data.get(COMPONENT_REPOS_KEY)
+        return [repo for repo in repositories if repo.get('type') == 'group']
 
-        Args:
-            dist (str): The name of the distribution associated with the group
-                repository.
+    @property
+    def hosted_repository_names(self):
+        """set(str): Hosted-type repository names for this product version."""
+        component_data = self.data.get(COMPONENT_VERSIONS_PRODUCT_MAP_KEY)
+        repositories = component_data.get(COMPONENT_REPOS_KEY)
 
-        Returns:
-            str: The group repository name.
-        """
-        return f'{self.name}-{dist}'
+        # Get all hosted repositories, plus any repos that might be under a group repo's "members" list.
+        hosted_repositories = set(repo.get('name') for repo in repositories if repo.get('type') == 'hosted')
+        for group_repo in self.group_repositories:
+            hosted_repositories |= set(group_repo.get('members'))
 
-    def get_hosted_repo_name(self, dist):
-        """Get the name of the hosted repository, i.e. NAME-VERSION-DIST.
-
-        Args:
-            dist (str): The name of the distribution associated with the hosted
-                repository.
-
-        Returns:
-            str: The hosted repository name.
-
-        """
-        return f'{self.name}-{self.version}-{dist}'
-
-    @staticmethod
-    def uninstall_docker_image(docker_image_name, docker_image_version, docker_api):
-        """Remove the Docker image associated with this product version.
-
-        Args:
-            docker_image_name (str): The name of the Docker image to uninstall.
-            docker_image_version (str): The version of the Docker image to uninstall.
-            docker_api (DockerApi): The nexusctl Docker API to interface with
-                the Docker registry.
-
-        Returns:
-            None
-
-        Raises:
-            ProductInstallException: If an error occurred removing the image.
-        """
-        docker_image_short_name = f'{docker_image_name}:{docker_image_version}'
-        try:
-            docker_api.delete_image(
-                docker_image_name, docker_image_version
-            )
-            print(f'Removed Docker image {docker_image_short_name}')
-        except HTTPError as err:
-            if err.code == 404:
-                print(f'{docker_image_short_name} has already been removed.')
-            else:
-                raise ProductInstallException(
-                    f'Failed to remove image {docker_image_short_name}: {err}'
-                )
+        return hosted_repositories
 
     @staticmethod
     def _get_repo_by_name(nexus_api, name):
         """Get a repository with the specified name.
 
         Args:
-            nexus_api (NexusApi): The nexusctl Nexus API to interface with
-                Nexus.
             name (str): The name of the repository.
 
         Returns:
@@ -354,77 +432,75 @@ class InstalledProductVersion:
         except HTTPError as err:
             raise ProductInstallException(f'Failed to get repository {name}: {err}')
 
-    def activate_hosted_repo(self, nexus_api, dist):
-        """Activate a version by making its hosted repository the default.
+    def activate_hosted_repos_in_group(self, nexus_api):
+        """Activate a version by updating its group repositories
 
-        This uses the Nexus API to make a hosted-type repo the first entry in a
-        group-type repo.
+        This uses the Nexus API to make hosted-type repos the sole entries
+        in their group-type repos.
 
         Args:
             nexus_api (NexusApi): The nexusctl Nexus API to interface with
                 Nexus.
-            dist (str): The name of the distribution associated with the hosted
-                and group repositories.
 
         Returns:
             None
 
         Raises:
-            ProductInstallException: if an error occurred activating the hosted
+            ProductInstallException: if an error occurred activating a hosted
                 repository.
         """
-        hosted_repo_name = self.get_hosted_repo_name(dist)
-        group_repo_name = self.get_group_repo_name(dist)
-        # Ensure hosted repo exists
-        try:
-            self._get_repo_by_name(nexus_api, hosted_repo_name)
-        except ProductInstallException as err:
-            raise ProductInstallException(
-                f'Unable to identify hosted repository for version {self.version} of {self.name}: {err}'
-            )
-        try:
-            group_repo = self._get_repo_by_name(nexus_api, group_repo_name)
-        except ProductInstallException as err:
-            raise ProductInstallException(
-                f'Unable to identify group repository for version {self.version} of {self.name}: {err}'
-            )
-        try:
-            nexus_api.repos.raw_group.update(
-                group_repo.name,
-                group_repo.online,
-                group_repo.storage.blobstore_name,
-                group_repo.storage.strict_content_type_validation,
-                member_names=(hosted_repo_name,)
-            )
-            print(f'Repository {hosted_repo_name} is now the default in {group_repo_name}.')
-        except HTTPError as err:
-            raise ProductInstallException(
-                f'Failed to activate {hosted_repo_name} in {group_repo_name}: {err}'
-            )
-
-    def uninstall_hosted_repo(self, nexus_api, dist):
-        """Remove a version's package repository from Nexus.
-
-        Args:
-            nexus_api (NexusApi): The nexusctl Nexus API to interface with
-                Nexus.
-            dist (str): The name of the distribution associated with the hosted
-                repository.
-
-        Returns:
-            None
-
-        Raises:
-            ProductInstallException: If an error occurred removing the repository.
-        """
-        hosted_repo_name = self.get_hosted_repo_name(dist)
-        try:
-            nexus_api.repos.delete(hosted_repo_name)
-            print(f'Repository {hosted_repo_name} has been removed.')
-        except HTTPError as err:
-            if err.code == 404:
-                print(f'{hosted_repo_name} has already been removed.')
-            else:
-                raise ProductInstallException(
-                    f'Failed to remove repository {hosted_repo_name}: {err}'
+        errors = False
+        for group_repo_data in self.group_repositories:
+            members = group_repo_data['members']
+            group_repo = self._get_repo_by_name(nexus_api, group_repo_data.get('name'))
+            try:
+                # NOTE: if one of the members does not exist, then
+                # this will result in an HTTP 400 (Bad Request) error.
+                nexus_api.repos.raw_group.update(
+                    group_repo.name,
+                    group_repo.online,
+                    group_repo.storage.blobstore_name,
+                    group_repo.storage.strict_content_type_validation,
+                    member_names=members
                 )
+                print(
+                    f'Updated group repository {group_repo.name} '
+                    f'with member repositories: [{",".join(members)}]'
+                )
+            except HTTPError as err:
+                errors = True
+                print(f'Failed to update group repository {group_repo.name} '
+                      f'with member repositories: [{",".join(members)}]. Error: {err}')
+        if errors:
+            raise ProductInstallException(
+                f'One or more errors occurred activating repositories for {self.name} {self.version}.'
+            )
+
+    def uninstall_hosted_repos(self, nexus_api):
+        """Remove a version's package repositories from Nexus.
+
+        Args:
+            nexus_api (NexusApi): The nexusctl Nexus API to interface with
+                Nexus.
+
+        Returns:
+            None
+
+        Raises:
+            ProductInstallException: If an error occurred removing a repository.
+        """
+        errors = False
+        for hosted_repo_name in self.hosted_repository_names:
+            try:
+                nexus_api.repos.delete(hosted_repo_name)
+                print(f'Repository {hosted_repo_name} has been removed.')
+            except HTTPError as err:
+                if err.code == 404:
+                    print(f'{hosted_repo_name} has already been removed.')
+                else:
+                    print(f'Failed to remove hosted repository {hosted_repo_name}: {err}')
+                    errors = True
+        if errors:
+            raise ProductInstallException(
+                f'One or more errors occurred uninstalling repositories for {self.name} {self.version}.'
+            )
