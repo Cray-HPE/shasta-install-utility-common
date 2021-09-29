@@ -21,4 +21,4 @@
 nose
 coverage
 pycodestyle
-
+sphinx
