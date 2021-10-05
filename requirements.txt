@@ -1,0 +1,6 @@
+# Top-level requirements for sat-install-utility
+# (C) Copyright 2021 Hewlett Packard Enterprise Development LP.
+nexusctl @ git+https://stash.us.cray.com/scm/ssa/nexusctl.git@main
+kubernetes >= 11.0, < 12.0
+pyyaml
+urllib3
