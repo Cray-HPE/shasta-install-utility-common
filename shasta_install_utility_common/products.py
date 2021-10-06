@@ -18,7 +18,7 @@ from urllib.error import HTTPError
 from yaml import safe_load, YAMLError, YAMLLoadWarning
 
 
-from install_utility_common.constants import (
+from shasta_install_utility_common.constants import (
     COMPONENT_DOCKER_KEY,
     COMPONENT_REPOS_KEY,
     COMPONENT_VERSIONS_PRODUCT_MAP_KEY,

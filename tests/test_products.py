@@ -1,5 +1,5 @@
 """
-Unit tests for the install_utility_common.products module.
+Unit tests for the shasta_install_utility_common.products module.
 
 (C) Copyright 2021 Hewlett Packard Enterprise Development LP.
 """
@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 
 from kubernetes.config import ConfigException
 
-from install_utility_common.products import (
+from shasta_install_utility_common.products import (
     uninstall_docker_image,
     ProductCatalog,
     ProductInstallException,
@@ -26,8 +26,8 @@ class TestGetK8sAPI(unittest.TestCase):
 
     def setUp(self):
         """Set up mocks."""
-        self.mock_load_kube_config = patch('install_utility_common.products.load_kube_config').start()
-        self.mock_corev1api = patch('install_utility_common.products.CoreV1Api').start()
+        self.mock_load_kube_config = patch('shasta_install_utility_common.products.load_kube_config').start()
+        self.mock_corev1api = patch('shasta_install_utility_common.products.CoreV1Api').start()
 
     def tearDown(self):
         """Stop patches."""
@@ -57,11 +57,11 @@ class TestProductCatalog(unittest.TestCase):
         self.mock_k8s_api = patch.object(ProductCatalog, '_get_k8s_api').start().return_value
         self.mock_product_catalog_data = copy.deepcopy(MOCK_PRODUCT_CATALOG_DATA)
         self.mock_k8s_api.read_namespaced_config_map.return_value = Mock(data=self.mock_product_catalog_data)
-        self.mock_environ = patch('install_utility_common.products.os.environ').start()
-        self.mock_check_output = patch('install_utility_common.products.subprocess.check_output').start()
+        self.mock_environ = patch('shasta_install_utility_common.products.os.environ').start()
+        self.mock_check_output = patch('shasta_install_utility_common.products.subprocess.check_output').start()
         self.mock_print = patch('builtins.print').start()
-        self.mock_docker = patch('install_utility_common.products.DockerApi').start().return_value
-        self.mock_nexus = patch('install_utility_common.products.NexusApi').start().return_value
+        self.mock_docker = patch('shasta_install_utility_common.products.DockerApi').start().return_value
+        self.mock_nexus = patch('shasta_install_utility_common.products.NexusApi').start().return_value
 
     def create_and_assert_product_catalog(self):
         """Assert the product catalog was created as expected."""
@@ -135,7 +135,7 @@ class TestProductCatalog(unittest.TestCase):
     def test_remove_product_docker_images(self):
         """Test a basic removal of a product's docker images."""
         product_catalog = self.create_and_assert_product_catalog()
-        with patch('install_utility_common.products.uninstall_docker_image') as mock_uninstall_docker_image:
+        with patch('shasta_install_utility_common.products.uninstall_docker_image') as mock_uninstall_docker_image:
             product_catalog.remove_product_docker_images('sat', '2.0.0')
             mock_uninstall_docker_image.assert_has_calls([
                 call('cray/cray-sat', '1.0.0', self.mock_docker),
@@ -145,7 +145,7 @@ class TestProductCatalog(unittest.TestCase):
     def test_partial_remove_docker_images(self):
         """Test a removal of docker images when an image is shared."""
         product_catalog = self.create_and_assert_product_catalog()
-        with patch('install_utility_common.products.uninstall_docker_image') as mock_uninstall_docker_image:
+        with patch('shasta_install_utility_common.products.uninstall_docker_image') as mock_uninstall_docker_image:
             product_catalog.remove_product_docker_images('cos', '2.0.0')
             mock_uninstall_docker_image.assert_called_once_with(
                 'cray/cray-cos', '1.0.0', self.mock_docker
@@ -158,7 +158,7 @@ class TestProductCatalog(unittest.TestCase):
     def test_partial_remove_docker_images_other_product(self):
         """Test a removal when a product's only image is also used by another product."""
         product_catalog = self.create_and_assert_product_catalog()
-        with patch('install_utility_common.products.uninstall_docker_image') as mock_uninstall_docker_image:
+        with patch('shasta_install_utility_common.products.uninstall_docker_image') as mock_uninstall_docker_image:
             product_catalog.remove_product_docker_images('other_product', '2.0.0')
             mock_uninstall_docker_image.assert_not_called()
             self.mock_print.assert_called_once_with(
@@ -171,7 +171,7 @@ class TestProductCatalog(unittest.TestCase):
         product_catalog = self.create_and_assert_product_catalog()
         uninstall_exception = ProductInstallException('fail')
         expected_regex = 'One or more errors occurred removing Docker images for sat 2.0.0.'
-        with patch('install_utility_common.products.uninstall_docker_image', side_effect=uninstall_exception):
+        with patch('shasta_install_utility_common.products.uninstall_docker_image', side_effect=uninstall_exception):
             with self.assertRaisesRegex(ProductInstallException, expected_regex):
                 product_catalog.remove_product_docker_images('sat', '2.0.0')
         self.mock_print.assert_has_calls([

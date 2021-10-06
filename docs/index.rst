@@ -1,5 +1,5 @@
-install-utility-common
-======================
+shasta-install-utility-common
+=============================
 
 .. toctree::
    :maxdepth: 2

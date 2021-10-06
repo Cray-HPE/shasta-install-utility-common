@@ -12,12 +12,12 @@
 #
 import os
 import sys
-sys.path.insert(0, os.path.abspath('../install_utility_common'))
+sys.path.insert(0, os.path.abspath('../shasta_install_utility_common'))
 
 
 # -- Project information -----------------------------------------------------
 
-project = 'install-utility-common'
+project = 'shasta-install-utility-common'
 copyright = '2021 Hewlett Packard Enterprise Development LP'
 author = 'Eli Kamin'
 

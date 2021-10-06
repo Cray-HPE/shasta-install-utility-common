@@ -1,5 +1,5 @@
 """
-Contains constant values for install-utility-common.
+Contains constant values for shasta-install-utility-common.
 
 (C) Copyright 2021 Hewlett Packard Enterprise Development LP.
 """

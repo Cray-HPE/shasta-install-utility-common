@@ -1,12 +1,12 @@
-# install-utility-common
+# shasta-install-utility-common
 
-## Using install-utility-common
+## Using shasta-install-utility-common
 
-### Add a dependency on install-utility-common
+### Add a dependency on shasta-install-utility-common
 
 ```commandline
 $ cat requirements.txt
-install-utility-common
+shasta-install-utility-common
 ```
 
 ### Using the library
@@ -16,7 +16,7 @@ several functions for activation and removal of products. This uses the product
 catalog data discussed above to determine the component versions to activate/uninstall.
 
 ```python
-from install_utility_common import ProductCatalog
+from shasta_install_utility_common import ProductCatalog
 
 product_catalog = ProductCatalog()
 # Activate a version
@@ -28,9 +28,9 @@ product_catalog.remove_product_entry('sat', '2.0.0') # Remove SAT 2.0.0 from the
 ```
 
 
-## How install-utility-common works with the Product Catalog
+## How shasta-install-utility-common works with the Product Catalog
 
-For a product to use ``install-utility-common`` to support uninstall and downgrade,
+For a product to use ``shasta-install-utility-common`` to support uninstall and downgrade,
 it must register component version data in the ``cray-product-catalog`` Kubernetes
 ConfigMap at install time, in order to specify the various types and versions of
 components that make up the product version. This is expected to be done within
