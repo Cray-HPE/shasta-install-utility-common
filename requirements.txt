@@ -1,8 +1,7 @@
 # Top-level requirements for shasta-install-utility-common
 # (C) Copyright 2021 Hewlett Packard Enterprise Development LP.
 # TODO(CRAYSAT-1182): This could become "cray-product-catalog >= 1.2, < 1.3"
-# TODO(CRAYSAT-1185): This can't be specified in the requirements file yet, but it needs to be.
-#cray-product-catalog
+cray-product-catalog
 # TODO(CRAYSAT-1170): Eventually should stop installing from stash.
 nexusctl @ git+https://stash.us.cray.com/scm/ssa/nexusctl.git@main
 kubernetes >= 11.0, < 12.0
