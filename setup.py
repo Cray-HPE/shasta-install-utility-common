@@ -1,4 +1,4 @@
-# setuptools-based installation module for install-utility-common
+# setuptools-based installation module for shasta-install-utility-common
 # (C) Copyright 2021 Hewlett Packard Enterprise Development LP.
 
 from os import path
@@ -23,12 +23,12 @@ if version is None:
     version = 'VERSION_MISSING'
 
 setup(
-    name='install-utility-common',
+    name='shasta-install-utility-common',
     version=version,
-    description='Product Install Utilities',
+    description='Shasta Product Install Utilities',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    url='https://github.hpe.com/hpe/hpc-sat-install-utility-common',
+    url='https://github.hpe.com/hpe/hpc-sat-shasta-install-utility-common',
     author='Hewlett Packard Enterprise Development LP',
     packages=find_packages(exclude=['tests', 'tests.*', 'tools', 'tools.*']),
     python_requires='>=3, <4',

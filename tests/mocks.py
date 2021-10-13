@@ -1,5 +1,5 @@
 """
-Mock data for install_utility_common unit tests.
+Mock data for shasta_install_utility_common unit tests.
 
 (C) Copyright 2021 Hewlett Packard Enterprise Development LP.
 """
