@@ -388,6 +388,14 @@ class InstalledProductVersion:
 
         return hosted_repositories
 
+    @property
+    def clone_url(self):
+        """str or None: the clone url of the configuration repo for the product, if available.
+               Otherwise, None.
+        """
+        configuration = self.data.get('configuration')
+        return configuration and configuration['clone_url']
+
     @staticmethod
     def _get_repo_by_name(nexus_api, name):
         """Get a repository with the specified name.
