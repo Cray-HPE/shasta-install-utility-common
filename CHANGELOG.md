@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added a ``clone_url`` property to ``InstalledProductVersion`` objects.
 
+### Fixed
+
+- Fetch ``cray-product-catalog`` from internal ``arti.dev.cray.com`` instead of
+  ``artifactory.algol60.net`` to work around DNS issues in CJE.
+
 ## [2.1.0] - 2021-10-27
 
 ### Added
