@@ -15,7 +15,7 @@ pymod_build:
 
 pymod_test:
 		# Set PIP_EXTRA_INDEX_URL to pull in cray-product-catalog dependency for unit tests.
-		PIP_EXTRA_INDEX_URL="https://artifactory.algol60.net/artifactory/csm-python-modules/simple" \
+		PIP_EXTRA_INDEX_URL="https://arti.dev.cray.com/artifactory/csm-python-modules-remote/simple/" \
 		pip3 install -r requirements.txt
 		pip3 install -r requirements-dev.txt
 		mkdir -p pymod_test
