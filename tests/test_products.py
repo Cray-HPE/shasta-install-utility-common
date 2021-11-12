@@ -11,6 +11,7 @@ from unittest.mock import call, Mock, patch
 from urllib.error import HTTPError
 
 from kubernetes.config import ConfigException
+from yaml import safe_dump
 
 from shasta_install_utility_common.products import (
     uninstall_docker_image,
@@ -58,10 +59,17 @@ class TestProductCatalog(unittest.TestCase):
         self.mock_product_catalog_data = copy.deepcopy(MOCK_PRODUCT_CATALOG_DATA)
         self.mock_k8s_api.read_namespaced_config_map.return_value = Mock(data=self.mock_product_catalog_data)
         self.mock_environ = patch('shasta_install_utility_common.products.os.environ').start()
+        self.mock_temporary_file = patch(
+            'shasta_install_utility_common.products.NamedTemporaryFile'
+        ).start().return_value.__enter__.return_value
         self.mock_check_output = patch('shasta_install_utility_common.products.subprocess.check_output').start()
         self.mock_print = patch('builtins.print').start()
         self.mock_docker = patch('shasta_install_utility_common.products.DockerApi').start().return_value
         self.mock_nexus = patch('shasta_install_utility_common.products.NexusApi').start().return_value
+
+    def tearDown(self):
+        """Stop patches."""
+        patch.stopall()
 
     def create_and_assert_product_catalog(self):
         """Assert the product catalog was created as expected."""
@@ -81,7 +89,7 @@ class TestProductCatalog(unittest.TestCase):
         self.assertEqual(expected_names_and_versions, actual_names_and_versions)
 
     def test_create_product_catalog_invalid_product_data(self):
-        """Test creating a ProductCatalog when the product catalog contains invalid data."""
+        """Test creating a ProductCatalog when the product catalog contains invalid YAML."""
         self.mock_product_catalog_data['sat'] = '\t'
         with self.assertRaisesRegex(ProductInstallException, 'Failed to load ConfigMap data'):
             self.create_and_assert_product_catalog()
@@ -92,6 +100,17 @@ class TestProductCatalog(unittest.TestCase):
         with self.assertRaisesRegex(ProductInstallException,
                                     'No data found in mock-namespace/mock-name ConfigMap.'):
             self.create_and_assert_product_catalog()
+
+    def test_create_product_catalog_invalid_product_schema(self):
+        """Test creating a ProductCatalog when an entry contains valid YAML but does not match schema."""
+        self.mock_k8s_api.read_namespaced_config_map.return_value = Mock(data={
+            'sat': safe_dump({'2.1': {'this_key_is_not_allowed': {}}})
+        })
+        product_catalog = self.create_and_assert_product_catalog()
+        self.mock_print.assert_called_once_with(
+            'The following products have product catalog data that is not understood by the install utility: sat-2.1'
+        )
+        self.assertEqual(product_catalog.products, [])
 
     def test_get_matching_products(self):
         """Test getting a particular product by name/version."""
@@ -108,6 +127,21 @@ class TestProductCatalog(unittest.TestCase):
             {'name': 'cray/cos-cfs-install', 'version': '1.4.0'}
         ]}}
         self.assertEqual(expected_component_data, actual_matching_product.data)
+
+    def test_update_product_catalog(self):
+        """Test setting a version as active in the product catalog."""
+        product_catalog = self.create_and_assert_product_catalog()
+        product_catalog.activate_product_entry('mock_name', 'mock_version')
+        self.mock_temporary_file.write.assert_called_once_with(safe_dump({'active': True}))
+        self.mock_environ.update.assert_called_once_with({
+            'PRODUCT': 'mock_name',
+            'PRODUCT_VERSION': 'mock_version',
+            'CONFIG_MAP': 'mock-name',
+            'CONFIG_MAP_NS': 'mock-namespace',
+            'VALIDATE_SCHEMA': 'true',
+            'YAML_CONTENT': self.mock_temporary_file.name
+        })
+        self.mock_check_output.assert_called_once_with(['catalog_update'])
 
     def test_remove_from_product_catalog(self):
         """Test removing a version from the product catalog."""
