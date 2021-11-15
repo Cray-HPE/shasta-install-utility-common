@@ -6,8 +6,11 @@ Contains the ProductCatalog and InstalledProductVersion classes.
 
 import os
 import subprocess
+from tempfile import NamedTemporaryFile
 import warnings
 
+from cray_product_catalog.schema.validate import validate
+from jsonschema.exceptions import ValidationError
 from kubernetes.client import CoreV1Api
 from kubernetes.client.rest import ApiException
 from kubernetes.config import load_kube_config, ConfigException
@@ -15,7 +18,7 @@ from nexusctl import DockerApi, DockerClient, NexusApi, NexusClient
 from nexusctl.common import DEFAULT_DOCKER_REGISTRY_API_BASE_URL, DEFAULT_NEXUS_API_BASE_URL
 from urllib3.exceptions import MaxRetryError
 from urllib.error import HTTPError
-from yaml import safe_load, YAMLError, YAMLLoadWarning
+from yaml import safe_load, safe_dump, YAMLError, YAMLLoadWarning
 
 
 from shasta_install_utility_common.constants import (
@@ -139,6 +142,17 @@ class ProductCatalog:
                 f'Failed to load ConfigMap data: {err}'
             )
 
+        invalid_products = [
+            str(p) for p in self.products if not p.is_valid
+        ]
+        if invalid_products:
+            print(f'The following products have product catalog data that '
+                  f'is not understood by the install utility: {", ".join(invalid_products)}')
+
+        self.products = [
+            p for p in self.products if p.is_valid
+        ]
+
     def get_product(self, name, version):
         """Get the InstalledProductVersion matching the given name/version.
 
@@ -255,6 +269,50 @@ class ProductCatalog:
         product_to_uninstall = self.get_product(name, version)
         product_to_uninstall.uninstall_hosted_repos(self.nexus_api)
 
+    def activate_product_entry(self, name, version):
+        """Set this product version's entry as active in the product catalog.
+
+        This function uses the catalog_update script provided by
+        cray-product-catalog.
+
+        Args:
+            name (str): The name of the product to activate.
+            version (str): The version of the product to activate.
+
+        Returns:
+            None
+
+        Raises:
+            ProductInstallException: If an error occurred activating the entry.
+        """
+        with NamedTemporaryFile(mode='w') as temporary_file:
+            # Technically the addition of {"active": True} here is redundant,
+            # because running catalog_update will automatically set whatever
+            # version is being updated to be "active". When running catalog_update,
+            # this dictionary does not replace all the data for this product version;
+            # existing keys under the product version still be there.
+            temporary_file.write(safe_dump({'active': True}))
+            temporary_file.flush()
+            # Use os.environ so that PATH and VIRTUAL_ENV are used
+            # Note: reading the file using temporary_file.name while the file
+            # is already open does not work on Windows.
+            # See: https://docs.python.org/3/library/tempfile.html#tempfile.NamedTemporaryFile
+            os.environ.update({
+                'PRODUCT': name,
+                'PRODUCT_VERSION': version,
+                'CONFIG_MAP': self.name,
+                'CONFIG_MAP_NS': self.namespace,
+                'VALIDATE_SCHEMA': 'true',
+                'YAML_CONTENT': temporary_file.name
+            })
+            try:
+                subprocess.check_output(['catalog_update'])
+                print(f'Set {name}-{version} as active in the product catalog.')
+            except subprocess.CalledProcessError as err:
+                raise ProductInstallException(
+                    f'Error activating {name}-{version} in product catalog: {err}'
+                )
+
     def remove_product_entry(self, name, version):
         """Remove this product version's entry from the product catalog.
 
@@ -306,6 +364,15 @@ class InstalledProductVersion:
 
     def __str__(self):
         return f'{self.name}-{self.version}'
+
+    @property
+    def is_valid(self):
+        """bool: True if this product's version data fits the schema."""
+        try:
+            validate(self.data)
+            return True
+        except ValidationError:
+            return False
 
     @property
     def docker_images(self):
