@@ -138,6 +138,7 @@ class TestProductCatalog(unittest.TestCase):
             'PRODUCT_VERSION': 'mock_version',
             'CONFIG_MAP': 'mock-name',
             'CONFIG_MAP_NS': 'mock-namespace',
+            'SET_ACTIVE_VERSION': 'true',
             'VALIDATE_SCHEMA': 'true',
             'YAML_CONTENT': self.mock_temporary_file.name
         })

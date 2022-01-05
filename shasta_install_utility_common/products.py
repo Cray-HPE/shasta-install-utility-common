@@ -302,6 +302,7 @@ class ProductCatalog:
                 'PRODUCT_VERSION': version,
                 'CONFIG_MAP': self.name,
                 'CONFIG_MAP_NS': self.namespace,
+                'SET_ACTIVE_VERSION': 'true',
                 'VALIDATE_SCHEMA': 'true',
                 'YAML_CONTENT': temporary_file.name
             })
