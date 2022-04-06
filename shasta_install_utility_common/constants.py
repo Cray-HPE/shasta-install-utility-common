@@ -1,7 +1,7 @@
 """
 Contains constant values for shasta-install-utility-common.
 
-(C) Copyright 2021 Hewlett Packard Enterprise Development LP.
+(C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP.
 """
 
 from nexusctl.common import DEFAULT_DOCKER_REGISTRY_API_BASE_URL
@@ -14,3 +14,5 @@ DEFAULT_NEXUS_URL = DEFAULT_NEXUS_API_BASE_URL
 COMPONENT_VERSIONS_PRODUCT_MAP_KEY = 'component_versions'
 COMPONENT_REPOS_KEY = 'repositories'
 COMPONENT_DOCKER_KEY = 'docker'
+NEXUS_CREDENTIALS_SECRET_NAME = 'nexus-admin-credential'
+NEXUS_CREDENTIALS_SECRET_NAMESPACE = 'nexus'

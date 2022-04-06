@@ -1,9 +1,10 @@
 """
 Unit tests for the shasta_install_utility_common.products module.
 
-(C) Copyright 2021 Hewlett Packard Enterprise Development LP.
+(C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP.
 """
 
+from base64 import b64decode
 import copy
 from subprocess import CalledProcessError
 import unittest
@@ -19,7 +20,11 @@ from shasta_install_utility_common.products import (
     ProductInstallException,
     InstalledProductVersion
 )
-from tests.mocks import SAT_VERSIONS, MOCK_PRODUCT_CATALOG_DATA
+from tests.mocks import (
+    MOCK_PRODUCT_CATALOG_DATA,
+    MOCK_K8S_CRED_SECRET_DATA,
+    SAT_VERSIONS
+)
 
 
 class TestGetK8sAPI(unittest.TestCase):
@@ -58,6 +63,7 @@ class TestProductCatalog(unittest.TestCase):
         self.mock_k8s_api = patch.object(ProductCatalog, '_get_k8s_api').start().return_value
         self.mock_product_catalog_data = copy.deepcopy(MOCK_PRODUCT_CATALOG_DATA)
         self.mock_k8s_api.read_namespaced_config_map.return_value = Mock(data=self.mock_product_catalog_data)
+        self.mock_k8s_api.read_namespaced_secret.return_value = Mock(data=MOCK_K8S_CRED_SECRET_DATA)
         self.mock_environ = patch('shasta_install_utility_common.products.os.environ').start()
         self.mock_temporary_file = patch(
             'shasta_install_utility_common.products.NamedTemporaryFile'
@@ -73,8 +79,15 @@ class TestProductCatalog(unittest.TestCase):
 
     def create_and_assert_product_catalog(self):
         """Assert the product catalog was created as expected."""
-        product_catalog = ProductCatalog('mock-name', 'mock-namespace')
+        product_catalog = ProductCatalog('mock-name', 'mock-namespace',
+                                         nexus_credentials_secret_name='mock-secret',
+                                         nexus_credentials_secret_namespace='mock-secret-namespace')
         self.mock_k8s_api.read_namespaced_config_map.assert_called_once_with('mock-name', 'mock-namespace')
+        self.mock_k8s_api.read_namespaced_secret.assert_called_once_with('mock-secret', 'mock-secret-namespace')
+        self.mock_environ.update.assert_called_once_with(
+            {'NEXUS_USERNAME': b64decode(MOCK_K8S_CRED_SECRET_DATA['username']).decode(),
+             'NEXUS_PASSWORD': b64decode(MOCK_K8S_CRED_SECRET_DATA['password']).decode()}
+        )
         return product_catalog
 
     def test_create_product_catalog(self):
@@ -133,7 +146,7 @@ class TestProductCatalog(unittest.TestCase):
         product_catalog = self.create_and_assert_product_catalog()
         product_catalog.activate_product_entry('mock_name', 'mock_version')
         self.mock_temporary_file.write.assert_called_once_with(safe_dump({'active': True}))
-        self.mock_environ.update.assert_called_once_with({
+        self.mock_environ.update.assert_called_with({
             'PRODUCT': 'mock_name',
             'PRODUCT_VERSION': 'mock_version',
             'CONFIG_MAP': 'mock-name',
@@ -148,7 +161,7 @@ class TestProductCatalog(unittest.TestCase):
         """Test removing a version from the product catalog."""
         product_catalog = self.create_and_assert_product_catalog()
         product_catalog.remove_product_entry('mock_name', 'mock_version')
-        self.mock_environ.update.assert_called_once_with({
+        self.mock_environ.update.assert_called_with({
             'PRODUCT': 'mock_name',
             'PRODUCT_VERSION': 'mock_version',
             'CONFIG_MAP': 'mock-name',
