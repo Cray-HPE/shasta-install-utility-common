@@ -1,8 +1,10 @@
 """
 Mock data for shasta_install_utility_common unit tests.
 
-(C) Copyright 2021 Hewlett Packard Enterprise Development LP.
+(C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP.
 """
+
+from base64 import b64encode
 
 from yaml import safe_dump
 
@@ -80,4 +82,12 @@ MOCK_PRODUCT_CATALOG_DATA = {
     'sat': safe_dump(SAT_VERSIONS),
     'cos': safe_dump(COS_VERSIONS),
     'other_product': safe_dump(OTHER_PRODUCT_VERSION)
+}
+
+
+# Some of the data returned by:
+# CoreV1Api().read_namespaced_secret(name='nexus-admin-credential', namespace='nexus')
+MOCK_K8S_CRED_SECRET_DATA = {
+    'password': b64encode('mock_password'.encode()),
+    'username': b64encode('mock_username'.encode())
 }

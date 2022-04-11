@@ -1,9 +1,10 @@
 """
 Contains the ProductCatalog and InstalledProductVersion classes.
 
-(C) Copyright 2021 Hewlett Packard Enterprise Development LP.
+(C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP.
 """
 
+from base64 import b64decode
 import os
 import subprocess
 from tempfile import NamedTemporaryFile
@@ -25,6 +26,8 @@ from shasta_install_utility_common.constants import (
     COMPONENT_DOCKER_KEY,
     COMPONENT_REPOS_KEY,
     COMPONENT_VERSIONS_PRODUCT_MAP_KEY,
+    NEXUS_CREDENTIALS_SECRET_NAME,
+    NEXUS_CREDENTIALS_SECRET_NAMESPACE,
     PRODUCT_CATALOG_CONFIG_MAP_NAME,
     PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE
 )
@@ -98,13 +101,21 @@ class ProductCatalog:
             raise ProductInstallException(f'Unable to load kubernetes configuration: {err}.')
 
     def __init__(self, name=PRODUCT_CATALOG_CONFIG_MAP_NAME, namespace=PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE,
-                 nexus_url=DEFAULT_NEXUS_API_BASE_URL, docker_url=DEFAULT_DOCKER_REGISTRY_API_BASE_URL):
+                 nexus_url=DEFAULT_NEXUS_API_BASE_URL, docker_url=DEFAULT_DOCKER_REGISTRY_API_BASE_URL,
+                 nexus_credentials_secret_name=NEXUS_CREDENTIALS_SECRET_NAME,
+                 nexus_credentials_secret_namespace=NEXUS_CREDENTIALS_SECRET_NAMESPACE):
         """Create the ProductCatalog object.
 
         Args:
             name (str): The name of the product catalog Kubernetes config map.
             namespace (str): The namespace of the product catalog Kubernetes
                 config map.
+            nexus_url (str): The URL of the Nexus repository API.
+            docker_url (str): The URL of the Docker repository API.
+            nexus_credentials_secret_name (str): The name of a Kubernetes secret
+                containing HTTP credentials to access Nexus.
+            nexus_credentials_secret_namespace (str): The namespace of a
+                Kubernetes secret containing HTTP credentials to access Nexus.
 
         Raises:
             ProductInstallException: if reading the config map failed.
@@ -112,6 +123,10 @@ class ProductCatalog:
         self.name = name
         self.namespace = namespace
         self.k8s_client = self._get_k8s_api()
+        self._update_environment_with_nexus_credentials(
+            nexus_credentials_secret_name, nexus_credentials_secret_namespace
+        )
+
         self.docker_api = DockerApi(DockerClient(docker_url))
         self.nexus_api = NexusApi(NexusClient(nexus_url))
         try:
@@ -152,6 +167,36 @@ class ProductCatalog:
         self.products = [
             p for p in self.products if p.is_valid
         ]
+
+    def _update_environment_with_nexus_credentials(self, secret_name, secret_namespace):
+        """Get the credentials for Nexus HTTP API access from a Kubernetes secret.
+
+        Nexusctl expects these to be set as environment variables. If they
+        cannot be obtained from a k8s secret, then print a warning and return.
+
+        Args:
+            secret_name (str): The name of the secret.
+            secret_namespace (str): The namespace of the secret.
+
+        Returns:
+            None. Updates os.environ as is expected by Nexusctl.
+        """
+        try:
+            secret = self.k8s_client.read_namespaced_secret(
+                secret_name, secret_namespace
+            )
+        except (MaxRetryError, ApiException):
+            print(f'WARNING: unable to read Kubernetes secret {secret_namespace}/{secret_name}')
+            return
+
+        if secret.data is None:
+            print(f'WARNING: unable to read Kubernetes secret {secret_namespace}/{secret_name}')
+            return
+
+        os.environ.update({
+            'NEXUS_USERNAME': b64decode(secret.data['username']).decode(),
+            'NEXUS_PASSWORD': b64decode(secret.data['password']).decode()
+        })
 
     def get_product(self, name, version):
         """Get the InstalledProductVersion matching the given name/version.
