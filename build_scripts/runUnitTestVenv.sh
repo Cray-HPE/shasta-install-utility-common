@@ -1,7 +1,8 @@
+#!/bin/bash
 #
 # MIT License
 #
-# (C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP
+# (C) Copyright 2022 Hewlett Packard Enterprise Development LP
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -22,14 +23,6 @@
 # OTHER DEALINGS IN THE SOFTWARE.
 #
 
-# Top-level requirements for shasta-install-utility-common
-
-# This should be pinned exactly to 1.3.2 due to issues with the build of cray-product-catalog
-cray-product-catalog==1.3.2
-nexusctl >= 1.1.1, < 2.0
-jsonschema >=3.2.0, < 4.0
-kubernetes >= 11.0, < 12.0
-# Require version < 6.0 of PyYAML because shasta_install_utility_common/products.py
-# imports YAMLLoadWarning which is not present in version >= 6.0.
-pyyaml >= 5.4, < 6.0
-urllib3
+base_dir=$(dirname "$0")
+source shasta-install-utility-common-venv/bin/activate
+$base_dir/runUnitTest.sh
