@@ -25,7 +25,7 @@
 
 # Set PIP_EXTRA_INDEX_URL to pull internal packages from internal locations:
 # artifactory.algol60.net/artifactory/csm-python-modules/simple/ - repo containing cray-product-catalog
-# arti.dev.cray.com/artifactory/internal-pip-stable-local/ - repo containing nexusctl
+# arti.hpc.amslabs.hpecorp.net/artifactory/internal-pip-stable-local/ - repo containing nexusctl
 PIP_EXTRA_INDEX_URL="https://artifactory.algol60.net/artifactory/csm-python-modules/simple/
-  https://arti.dev.cray.com/artifactory/internal-pip-stable-local/" pip3 install -r requirements.txt
+  https://arti.hpc.amslabs.hpecorp.net/artifactory/internal-pip-stable-local/" pip3 install -r requirements.txt
 pip3 install -r requirements-dev.txt

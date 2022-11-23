@@ -44,6 +44,9 @@ pipeline {
     stages {
         stage('Build Prep') {
             steps {
+                script {
+                    jenkinsUtils.writeNetRc()
+                }
                 sh 'make prep'
             }
         }
