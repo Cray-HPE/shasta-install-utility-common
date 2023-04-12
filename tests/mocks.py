@@ -1,7 +1,7 @@
 #
 # MIT License
 #
-# (C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP
+# (C) Copyright 2021-2023 Hewlett Packard Enterprise Development LP
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -27,8 +27,8 @@ Mock data for shasta_install_utility_common unit tests.
 
 from base64 import b64encode
 
+from attr import dataclass
 from yaml import safe_dump
-
 
 # Two versions of SAT that have no images in common with one another.
 SAT_VERSIONS = {
@@ -65,6 +65,9 @@ COS_VERSIONS = {
             'docker': [
                 {'name': 'cray/cray-cos', 'version': '1.0.0'},
                 {'name': 'cray/cos-cfs-install', 'version': '1.4.0'}
+            ],
+            'helm': [
+                {"name": "cos-config", "version": "1.0.0"}, 
             ]
         }
     },
@@ -76,6 +79,31 @@ COS_VERSIONS = {
             ],
             'repositories': [
                 {'name': 'cos-sle-15sp2', 'type': 'group', 'members': ['cos-2.0.1-sle-15sp2']},
+                {'name': 'cos-2.0.1-sle-15sp2', 'type': 'hosted'}
+            ]
+        }
+    },
+}
+
+COS_VERSIONS_NO_HELM = {
+    '2.0.0': {
+        'component_versions': {
+            'docker': [
+                {'name': 'cray/cray-cos', 'version': '1.0.0'},
+                {'name': 'cray/cos-cfs-install', 'version': '1.4.0'}
+            ],
+            'helm': []
+        }
+    },
+    '2.0.1': {
+        'component_versions': {
+            'docker': [
+                {'name': 'cray/cray-cos', 'version': '1.0.1'},
+                {'name': 'cray/cos-cfs-install', 'version': '1.4.0'}
+            ],
+            'repositories': [
+                {'name': 'cos-sle-15sp2', 'type': 'group',
+                    'members': ['cos-2.0.1-sle-15sp2']},
                 {'name': 'cos-2.0.1-sle-15sp2', 'type': 'hosted'}
             ]
         }
@@ -105,6 +133,10 @@ MOCK_PRODUCT_CATALOG_DATA = {
     'other_product': safe_dump(OTHER_PRODUCT_VERSION)
 }
 
+# A mock version of the data returned when querying the Product Catalog ConfigMap for Helm uninstall
+MOCK_PRODUCT_CATALOG_DATA_HELM_TESTS = {
+    'cos': COS_VERSIONS_NO_HELM,
+}
 
 # Some of the data returned by:
 # CoreV1Api().read_namespaced_secret(name='nexus-admin-credential', namespace='nexus')
@@ -112,3 +144,16 @@ MOCK_K8S_CRED_SECRET_DATA = {
     'password': b64encode('mock_password'.encode()),
     'username': b64encode('mock_username'.encode())
 }
+
+@dataclass
+class Component():
+    name: str
+    version: str
+    id: str
+
+class HelmChartComponents():
+    def __init__(self, components):
+        self.components = [components]
+    components: list[Component]
+
+MOCK_K8S_HELM_CHARTS_COMPONENTS = HelmChartComponents(Component("cos-config", "1.0.0", "id1"))

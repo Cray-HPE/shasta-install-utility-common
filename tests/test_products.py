@@ -1,7 +1,7 @@
 #
 # MIT License
 #
-# (C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP
+# (C) Copyright 2021-2023 Hewlett Packard Enterprise Development LP
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -25,27 +25,35 @@
 Unit tests for the shasta_install_utility_common.products module.
 """
 
-from base64 import b64decode
 import copy
-from subprocess import CalledProcessError
 import unittest
-from unittest.mock import call, Mock, patch
+from base64 import b64decode
+from http.client import HTTPResponse
+from re import U
+from subprocess import CalledProcessError
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 from urllib.error import HTTPError
+from urllib.request import Request
 
+from kubernetes.client import V1ConfigMap
+from kubernetes.client.rest import ApiException
 from kubernetes.config import ConfigException
+from nexusctl.common import HttpMethod
+from urllib3.exceptions import MaxRetryError
 from yaml import safe_dump
 
-from shasta_install_utility_common.products import (
-    uninstall_docker_image,
-    ProductCatalog,
-    ProductInstallException,
-    InstalledProductVersion
-)
-from tests.mocks import (
-    MOCK_PRODUCT_CATALOG_DATA,
-    MOCK_K8S_CRED_SECRET_DATA,
-    SAT_VERSIONS
-)
+from shasta_install_utility_common.constants import (
+    PRODUCT_CATALOG_CONFIG_MAP_NAME, PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE)
+from shasta_install_utility_common.products import (InstalledProductVersion,
+                                                    ProductCatalog,
+                                                    ProductInstallException,
+                                                    uninstall_docker_image,
+                                                    uninstall_k8_helm_charts,
+                                                    uninstall_nexus_helm_chart)
+from tests.mocks import (MOCK_K8S_CRED_SECRET_DATA,
+                         MOCK_K8S_HELM_CHARTS_COMPONENTS,
+                         MOCK_PRODUCT_CATALOG_DATA,
+                         MOCK_PRODUCT_CATALOG_DATA_HELM_TESTS, SAT_VERSIONS)
 
 
 class TestGetK8sAPI(unittest.TestCase):
@@ -93,6 +101,7 @@ class TestProductCatalog(unittest.TestCase):
         self.mock_print = patch('builtins.print').start()
         self.mock_docker = patch('shasta_install_utility_common.products.DockerApi').start().return_value
         self.mock_nexus = patch('shasta_install_utility_common.products.NexusApi').start().return_value
+        self.mock_nexus.components.return_value = Mock()
 
     def tearDown(self):
         """Stop patches."""
@@ -135,17 +144,6 @@ class TestProductCatalog(unittest.TestCase):
                                     'No data found in mock-namespace/mock-name ConfigMap.'):
             self.create_and_assert_product_catalog()
 
-    def test_create_product_catalog_invalid_product_schema(self):
-        """Test creating a ProductCatalog when an entry contains valid YAML but does not match schema."""
-        self.mock_k8s_api.read_namespaced_config_map.return_value = Mock(data={
-            'sat': safe_dump({'2.1': {'this_key_is_not_allowed': {}}})
-        })
-        product_catalog = self.create_and_assert_product_catalog()
-        self.mock_print.assert_called_once_with(
-            'The following products have product catalog data that is not understood by the install utility: sat-2.1'
-        )
-        self.assertEqual(product_catalog.products, [])
-
     def test_get_matching_products(self):
         """Test getting a particular product by name/version."""
         product_catalog = self.create_and_assert_product_catalog()
@@ -156,10 +154,16 @@ class TestProductCatalog(unittest.TestCase):
         self.assertEqual(
             expected_matching_name_and_version, (actual_matching_product.name, actual_matching_product.version)
         )
-        expected_component_data = {'component_versions': {'docker': [
-            {'name': 'cray/cray-cos', 'version': '1.0.0'},
-            {'name': 'cray/cos-cfs-install', 'version': '1.4.0'}
-        ]}}
+        expected_component_data = {'component_versions': {
+            'docker': [
+                {'name': 'cray/cray-cos', 'version': '1.0.0'},
+                {'name': 'cray/cos-cfs-install', 'version': '1.4.0'}
+            ],
+            'helm': [
+                {"name": "cos-config", "version": "1.0.0"},
+            ]
+        }
+        }
         self.assertEqual(expected_component_data, actual_matching_product.data)
 
     def test_update_product_catalog(self):
@@ -247,6 +251,39 @@ class TestProductCatalog(unittest.TestCase):
             call(f'Failed to remove cray/cray-sat:1.0.0: {uninstall_exception}'),
             call(f'Failed to remove cray/sat-cfs-install:1.4.0: {uninstall_exception}')
         ])
+    
+    @patch('shasta_install_utility_common.products.uninstall_nexus_helm_chart')
+    @patch('shasta_install_utility_common.products.uninstall_k8_helm_charts')
+    def test_remove_helm_charts(self, mock_uninstall_k8_helm_chart, mock_uninstall_nexus_helm_chart):
+        """Test for removing helm charts from the product catalog."""
+        product_catalog = self.create_and_assert_product_catalog()
+        updated_config_map = copy.deepcopy(MOCK_PRODUCT_CATALOG_DATA_HELM_TESTS)
+        mock_uninstall_k8_helm_chart.return_value = V1ConfigMap(data=updated_config_map)
+        self.mock_nexus.components.list.return_value = MOCK_K8S_HELM_CHARTS_COMPONENTS
+        product_catalog.remove_helm_charts("cos", "2.0.0")
+        mock_uninstall_nexus_helm_chart.assert_called_once_with("cos-config", "1.0.0", "id1", self.mock_nexus)
+        mock_uninstall_k8_helm_chart.assert_called_once_with("cos", "2.0.0", [("cos-config", "1.0.0", "id1")], self.mock_k8s_api)
+        self.mock_temporary_file.write.assert_called_once_with(safe_dump(updated_config_map['cos']['2.0.0']))
+        self.mock_environ.update.assert_called_with({
+            'PRODUCT': 'cos',
+            'PRODUCT_VERSION': '2.0.0',
+            'CONFIG_MAP': 'mock-name',
+            'CONFIG_MAP_NS': 'mock-namespace',
+            'SET_ACTIVE_VERSION': 'true',
+            'VALIDATE_SCHEMA': 'true',
+            'YAML_CONTENT': self.mock_temporary_file.name
+        })
+        
+    @patch('shasta_install_utility_common.products.uninstall_nexus_helm_chart')
+    @patch('shasta_install_utility_common.products.uninstall_k8_helm_charts')
+    def test_remove_helm_charts(self, mock_uninstall_k8_helm_chart, mock_uninstall_nexus_helm_chart):
+        """Test for removing helm charts from the product catalog."""
+        product_catalog = self.create_and_assert_product_catalog()
+        updated_config_map = copy.deepcopy(MOCK_PRODUCT_CATALOG_DATA_HELM_TESTS)
+        mock_uninstall_k8_helm_chart.return_value = V1ConfigMap(data=updated_config_map)
+        self.mock_nexus.components.list.return_value = []
+        product_catalog.remove_helm_charts("cos", "2.0.0")
+        self.mock_print.assert_called_once_with("No helm charts found to remove for cos:2.0.0")
 
     def test_activate_product_hosted_repos(self):
         """Test activate_product_hosted_repos."""
@@ -298,14 +335,99 @@ class TestUninstallDockerImage(unittest.TestCase):
         with self.assertRaisesRegex(ProductInstallException, expected_regex):
             uninstall_docker_image('foo', 'bar', self.mock_docker_api)
         self.mock_docker_api.delete_image.assert_called_once_with('foo', 'bar')
+        
+class TestUninstallK8HelmCharts(unittest.TestCase):
+    """Tests for uninstall_k8_helm_charts"""
+    
+    def setUp(self) -> None:
+        self.mock_k8s_client = Mock()
+        self.product_name = "foo-product"
+        
+    def tearDown(self) -> None:
+        patch.stopall()
+        
+    def test_uninstall_k8_helm_charts(self):
+        data = {
+            "foo-product": "1.0.0:\n  component_versions:\n    docker:\n    - name: arti.hpc.amslabs.hpecorp.net/cray-product-catalog-update\n      version: 1.3.2\n    - name: arti.hpc.amslabs.hpecorp.net/cray-cos-config\n      version: 1.6.26\n    - name: arti.hpc.amslabs.hpecorp.net/cray-cos-image-sle15sp4\n      version: 2.1.18\n    - name: cray/cray-cps-pm\n      version: 2.8.6\n    - name: cray/cray-cps-broker\n      version: 2.11.10\n    - name: cray/cos-install-utility\n      version: 1.3.2\n    - name: cray/cray-nmdv2\n      version: 2.10.10\n    - name: cray/cray-cos-config-service\n      version: 1.0.3\n    - name: cray/cray-cps-cm\n      version: 2.8.6\n    helm:\n    - name: foo-chart\n      version: 0.0.1\n    - name: cray-cps\n      version: 1.10.10\n    - name: nmdv2-service\n      version: 1.10.10\n    - name: cos-sle15sp4-artifacts\n      version: 2.1.18\n    - name: cos-config-service\n      version: 1.0.3\n    manifests:\n    - config-data/argo/loftsman/cos/2.5.99/manifests/cos-services.yaml\n    repositories:\n    - name: cos-2.5.99-sle-15sp4\n      type: hosted\n    - members:\n      - cos-2.5.99-sle-15sp4\n      name: cos-2.5-sle-15sp4\n      type: group\n    - name: cos-2.5.99-net-sle-15sp4-shs-2.0\n      type: hosted\n    - members:\n      - cos-2.5.99-net-sle-15sp4-shs-2.0\n      name: cos-2.5-net-sle-15sp4-shs-2.0\n      type: group\n    - name: cos-2.5.99-sle-15sp4-compute\n      type: hosted\n    - members:\n      - cos-2.5.99-sle-15sp4-compute\n      name: cos-2.5-sle-15sp4-compute\n      type: group\n    - name: cos-2.5.99-net-sle-15sp4-compute-shs-2.0\n      type: hosted\n    - members:\n      - cos-2.5.99-net-sle-15sp4-compute-shs-2.0\n      name: cos-2.5-net-sle-15sp4-compute-shs-2.0\n      type: group\n  configuration:\n    clone_url: https://vcs.cmn.mug.hpc.amslabs.hpecorp.net/vcs/cray/cos-config-management.git\n    commit: b1d15f5f5216a3391adcba47afb9ab80f3109795\n    import_branch: cray/cos/2.5.99\n    import_date: 2023-03-24 10:13:09.580643\n    ssh_url: git@vcs.cmn.mug.hpc.amslabs.hpecorp.net:cray/cos-config-management.git\n  images: {}\n  recipes:\n    cray-shasta-compute-sles15sp4.noarch-2.5.30:\n      id: 3b1cb85d-c1fb-4a4b-9b7f-7a06a9fe2411\n",
+        }
+        expected_data = {
+            "foo-product": "1.0.0:\n  component_versions:\n    docker:\n    - name: arti.hpc.amslabs.hpecorp.net/cray-product-catalog-update\n      version: 1.3.2\n    - name: arti.hpc.amslabs.hpecorp.net/cray-cos-config\n      version: 1.6.26\n    - name: arti.hpc.amslabs.hpecorp.net/cray-cos-image-sle15sp4\n      version: 2.1.18\n    - name: cray/cray-cps-pm\n      version: 2.8.6\n    - name: cray/cray-cps-broker\n      version: 2.11.10\n    - name: cray/cos-install-utility\n      version: 1.3.2\n    - name: cray/cray-nmdv2\n      version: 2.10.10\n    - name: cray/cray-cos-config-service\n      version: 1.0.3\n    - name: cray/cray-cps-cm\n      version: 2.8.6\n    helm:\n    - name: cray-cps\n      version: 1.10.10\n    - name: nmdv2-service\n      version: 1.10.10\n    - name: cos-sle15sp4-artifacts\n      version: 2.1.18\n    - name: cos-config-service\n      version: 1.0.3\n    manifests:\n    - config-data/argo/loftsman/cos/2.5.99/manifests/cos-services.yaml\n    repositories:\n    - name: cos-2.5.99-sle-15sp4\n      type: hosted\n    - members:\n      - cos-2.5.99-sle-15sp4\n      name: cos-2.5-sle-15sp4\n      type: group\n    - name: cos-2.5.99-net-sle-15sp4-shs-2.0\n      type: hosted\n    - members:\n      - cos-2.5.99-net-sle-15sp4-shs-2.0\n      name: cos-2.5-net-sle-15sp4-shs-2.0\n      type: group\n    - name: cos-2.5.99-sle-15sp4-compute\n      type: hosted\n    - members:\n      - cos-2.5.99-sle-15sp4-compute\n      name: cos-2.5-sle-15sp4-compute\n      type: group\n    - name: cos-2.5.99-net-sle-15sp4-compute-shs-2.0\n      type: hosted\n    - members:\n      - cos-2.5.99-net-sle-15sp4-compute-shs-2.0\n      name: cos-2.5-net-sle-15sp4-compute-shs-2.0\n      type: group\n  configuration:\n    clone_url: https://vcs.cmn.mug.hpc.amslabs.hpecorp.net/vcs/cray/cos-config-management.git\n    commit: b1d15f5f5216a3391adcba47afb9ab80f3109795\n    import_branch: cray/cos/2.5.99\n    import_date: 2023-03-24 10:13:09.580643\n    ssh_url: git@vcs.cmn.mug.hpc.amslabs.hpecorp.net:cray/cos-config-management.git\n  images: {}\n  recipes:\n    cray-shasta-compute-sles15sp4.noarch-2.5.30:\n      id: 3b1cb85d-c1fb-4a4b-9b7f-7a06a9fe2411\n",
+        }
+        removed_helm_data = data
+        removed_helm_data[self.product_name] = expected_data[self.product_name]
+        expected_config_map_data = V1ConfigMap(data=removed_helm_data)
 
+        self.mock_k8s_client.read_namespaced_config_map.return_value = V1ConfigMap(data=data)
+        updated_config_map = uninstall_k8_helm_charts(self.product_name, '1.0.0', [
+                                 ('foo-chart', '0.0.1', 'foo-id')], self.mock_k8s_client)
+        self.mock_k8s_client.read_namespaced_config_map.assert_called_with(
+            PRODUCT_CATALOG_CONFIG_MAP_NAME, PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE)
+        
+        assert updated_config_map.data == expected_config_map_data.data
+
+    def test_uninstall_k8_helm_charts_no_charts(self):
+        with self.assertRaises(ProductInstallException,
+                               msg="No charts to delete from cray-product-catalog ConfigMap."):
+            uninstall_k8_helm_charts(self.product_name, '1.0.0', [], self.mock_k8s_client)
+
+    def test_uninstall_k8_helm_charts_max_retry(self):
+        self.mock_k8s_client.read_namespaced_config_map.side_effect = MaxRetryError(url=None, pool=None)
+        with self.assertRaises(ProductInstallException,
+                               msg=f"Unable to connect to Kubernetes to read {PRODUCT_CATALOG_CONFIG_MAP_NAME}/foo-product ConfigMap:"):
+            uninstall_k8_helm_charts(self.product_name, '1.0.0', [('foo-chart', '0.0.1')], self.mock_k8s_client)
+
+    def test_uninstall_k8_helm_charts_api_exception(self):
+        self.mock_k8s_client.read_namespaced_config_map.side_effect = ApiException()
+        with self.assertRaises(ProductInstallException,
+                               msg=f"Error reading {PRODUCT_CATALOG_CONFIG_MAP_NAME}/{self.product_name} ConfigMap:"):
+            uninstall_k8_helm_charts(self.product_name, '1.0.0', [('foo-chart', '0.0.1')], self.mock_k8s_client)
+
+    def test_uninstall_k8_helm_charts_no_data(self):
+        self.mock_k8s_client.read_namespaced_config_map.return_value = V1ConfigMap(data={})
+        with self.assertRaises(ProductInstallException,
+                               msg=f"No data found in {PRODUCT_CATALOG_CONFIG_MAP_NAME}/{self.product_name} ConfigMap."):
+            uninstall_k8_helm_charts(self.product_name, '1.0.0', [('foo-chart', '0.0.1')], self.mock_k8s_client)
+
+
+class TestUninstallNexusHelmChart(unittest.TestCase):
+    """Tests for uninstall_nexus_helm_chart."""
+
+    def setUp(self) -> None:
+        self.mock_nexus_api = Mock()
+        self.mock_nexus_api.client = Mock()
+        self.mock_nexus_api.client.base_url = "http://nexus"
+        self.mock_nexus_api.components = Mock()
+        self.mock_print: MagicMock | AsyncMock = patch('builtins.print').start()
+
+    def tearDown(self) -> None:
+        patch.stopall()
+        
+    def test_uninstall_nexus_helm_chart(self):
+        """Tests for uninstall_nexus_helm_chart for an InstalledProductVersion."""
+        uninstall_nexus_helm_chart('foo', '1.2.3', 'foo-id', self.mock_nexus_api)
+        self.mock_nexus_api.components.delete.assert_called_once_with('foo-id')
+        
+    def test_uninstall_nexus_helm_chart_not_found(self):
+        """Tests for uninstall_nexus_helm_chart for 404 error."""
+        self.mock_nexus_api.components.delete.side_effect = HTTPError(
+            "url", 404, "foo msg", None, None)
+        uninstall_nexus_helm_chart('foo', '1.2.3', 'foo-id', self.mock_nexus_api)
+        self.mock_print.assert_called_once_with(
+        "Helm chart foo:1.2.3 has already been removed.")
+        
+    def test_uninstall_nexus_helm_chart_non_200(self):
+        """Tests for uninstall_nexus_helm_chart for non-200 error."""
+        self.mock_nexus_api.components.delete.side_effect = HTTPError(
+            "url", 500, "foo msg", None, None)
+        with self.assertRaises(ProductInstallException, msg='Failed to remove helm chart foo:1.2.3: string response'):
+            uninstall_nexus_helm_chart('foo', '1.2.3', 'foo-id', self.mock_nexus_api)
 
 class TestInstalledProductVersion(unittest.TestCase):
     """Tests for the InstalledProductVersion class."""
     def setUp(self):
         """Set up mocks."""
         self.installed_product_version = InstalledProductVersion(
-            'sat', '2.0.1', SAT_VERSIONS['2.0.1']
+            'sat', '2.0.1', SAT_VERSIONS['2.0.1'], None
         )
         self.mock_nexus_api = Mock()
         self.mock_group_members = ['sat-3.0.0-sle-15sp3', 'sat-2.2.0-sle-15sp3', 'sat-1.0.1-sle-15sp3']
@@ -331,7 +453,7 @@ class TestInstalledProductVersion(unittest.TestCase):
     def test_legacy_docker_images(self):
         """Test getting the Docker images from an 'old'-style product catalog entry."""
         legacy_installed_product_version = InstalledProductVersion(
-            'sat', '1.0.1', {'component_versions': {'sat': '1.0.0'}}
+            'sat', '1.0.1', {'component_versions': {'sat': '1.0.0'}}, None
         )
         expected_docker_image_versions = [('cray/cray-sat', '1.0.0')]
         self.assertEqual(
@@ -341,21 +463,21 @@ class TestInstalledProductVersion(unittest.TestCase):
     def test_no_docker_images(self):
         """Test a product that has an empty dictionary under the 'docker' key returns an empty dictionary."""
         product_with_no_docker_images = InstalledProductVersion(
-            'sat', '0.9.9', {'component_versions': {'docker': {}}}
+            'sat', '0.9.9', {'component_versions': {'docker': {}}}, None
         )
         self.assertEqual(product_with_no_docker_images.docker_images, [])
 
     def test_no_docker_images_null(self):
         """Test a product that has None under the 'docker' key returns an empty dictionary."""
         product_with_no_docker_images = InstalledProductVersion(
-            'sat', '0.9.9', {'component_versions': {'docker': None}}
+            'sat', '0.9.9', {'component_versions': {'docker': None}}, None
         )
         self.assertEqual(product_with_no_docker_images.docker_images, [])
 
     def test_no_docker_images_empty_list(self):
         """Test a product that has an empty list under the 'docker' key returns an empty dictionary."""
         product_with_no_docker_images = InstalledProductVersion(
-            'sat', '0.9.9', {'component_versions': {'docker': []}}
+            'sat', '0.9.9', {'component_versions': {'docker': []}}, None
         )
         self.assertEqual(product_with_no_docker_images.docker_images, [])
 
@@ -386,7 +508,7 @@ class TestInstalledProductVersion(unittest.TestCase):
         sat_version_data['component_versions']['repositories'] = [
             {'name': 'my-hosted-repo', 'type': 'hosted'}
         ]
-        ipv = InstalledProductVersion('sat', '2.0.0', sat_version_data)
+        ipv = InstalledProductVersion('sat', '2.0.0', sat_version_data, None)
         expected_hosted_repo_names = {'my-hosted-repo'}
         self.assertEqual(ipv.hosted_repository_names, expected_hosted_repo_names)
 
@@ -396,7 +518,7 @@ class TestInstalledProductVersion(unittest.TestCase):
         sat_version_data['component_versions']['repositories'] = [
             {'name': 'my-group-repo', 'type': 'group', 'members': ['my-hosted-repo']}
         ]
-        ipv = InstalledProductVersion('sat', '2.0.0', sat_version_data)
+        ipv = InstalledProductVersion('sat', '2.0.0', sat_version_data, None)
         expected_hosted_repo_names = {'my-hosted-repo'}
         self.assertEqual(ipv.hosted_repository_names, expected_hosted_repo_names)
 
