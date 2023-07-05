@@ -1,7 +1,7 @@
 #
 # MIT License
 #
-# (C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP
+# (C) Copyright 2021-2023 Hewlett Packard Enterprise Development LP
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -25,33 +25,40 @@
 Contains the ProductCatalog and InstalledProductVersion classes.
 """
 
-from base64 import b64decode
 import os
 import subprocess
-from tempfile import NamedTemporaryFile
 import warnings
+from base64 import b64decode
+from tempfile import NamedTemporaryFile
+from typing import Any, Dict, List, Optional, Tuple, Union
+from urllib.error import HTTPError
+from urllib.request import Request
 
 from cray_product_catalog.schema.validate import validate
 from jsonschema.exceptions import ValidationError
-from kubernetes.client import CoreV1Api
+from kubernetes.client import CoreV1Api, V1ConfigMap
 from kubernetes.client.rest import ApiException
-from kubernetes.config import load_kube_config, ConfigException
+from kubernetes.config import ConfigException, load_kube_config
 from nexusctl import DockerApi, DockerClient, NexusApi, NexusClient
-from nexusctl.common import DEFAULT_DOCKER_REGISTRY_API_BASE_URL, DEFAULT_NEXUS_API_BASE_URL
+from nexusctl.common import (DEFAULT_DOCKER_REGISTRY_API_BASE_URL,
+                             DEFAULT_NEXUS_API_BASE_URL)
+from nexusctl.nexus.models import RepoListGroupEntry, RepoListHostedEntry
+from nexusctl.nexus.models.component_xo import PageComponentXO
 from urllib3.exceptions import MaxRetryError
-from urllib.error import HTTPError
-from yaml import safe_load, safe_dump, YAMLError, YAMLLoadWarning
-
+from yaml import YAMLError, YAMLLoadWarning, safe_dump, safe_load
 
 from shasta_install_utility_common.constants import (
-    COMPONENT_DOCKER_KEY,
-    COMPONENT_REPOS_KEY,
-    COMPONENT_VERSIONS_PRODUCT_MAP_KEY,
-    NEXUS_CREDENTIALS_SECRET_NAME,
-    NEXUS_CREDENTIALS_SECRET_NAMESPACE,
-    PRODUCT_CATALOG_CONFIG_MAP_NAME,
-    PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE
-)
+    COMPONENT_DOCKER_KEY, COMPONENT_HELM_KEY, COMPONENT_REPOS_KEY,
+    COMPONENT_VERSIONS_PRODUCT_MAP_KEY, NEXUS_CREDENTIALS_SECRET_NAME,
+    NEXUS_CREDENTIALS_SECRET_NAMESPACE, PRODUCT_CATALOG_CONFIG_MAP_NAME,
+    PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE)
+
+Name = str
+Version = str
+NexusComponentId = str
+HelmChartDict = Dict[Name, Version]
+HelmChartTuples = List[Tuple[Name, Version]]
+NexusHelmChartTuples = List[Tuple[Name, Version, NexusComponentId]]
 
 
 def uninstall_docker_image(docker_image_name, docker_image_version, docker_api):
@@ -86,6 +93,98 @@ def uninstall_docker_image(docker_image_name, docker_image_version, docker_api):
             raise ProductInstallException(
                 f'Failed to remove image {docker_image_short_name}: {err}'
             )
+
+
+def uninstall_nexus_helm_chart(name: Name, version: Version, id: NexusComponentId, nexus_api: NexusApi) -> None:
+    """
+    Removes a specified helm chart from the the nexus hosted chart repository
+
+    Args:
+        name (str): The name of the helm chart to be removed from nexus.
+        version (str): The version of the helm chart to be removed from the nexus.
+        id (str): The component id of the helm chart to be removed from the nexus.
+        nexus_api (NexusApi): The nexusctl Nexus API to interface with the repository.
+
+    Raises:
+        ProductInstallException: If an error is encountered during deletion.
+    """
+    helm_chart_short_name: str = f"{name}:{version}"
+    try:
+        nexus_api.components.delete(id)
+    except HTTPError as err:
+        if err.code == 404:
+            print(
+                f"Helm chart {helm_chart_short_name} has already been removed.")
+        else:
+            raise ProductInstallException(
+                f"Failed to remove helm chart {helm_chart_short_name} from nexus")
+
+
+def uninstall_k8_helm_charts(product_name: str,
+                             product_version: str,
+                             charts_deleted_nexus: NexusHelmChartTuples,
+                             k8s_client: CoreV1Api) -> V1ConfigMap:
+    """
+    Removes all charts deleted from nexus to propogate changes to cluster configmaps using cray-product-catalog
+    catalog_update.py. This assures that both charts will be delete in Nexus and then ConfigMaps.
+
+    Args:
+        charts_deleted_from_nexus (HelmChartTuples): The list of charts deleted from Nexus.
+        k8s_client (CoreV1Api): Kubernetes client to interface with cluster with.
+
+    Raises:
+        ProductInstallException: If the k8s_client can not connect to the cluster or data is not found.
+        ApiException: If unknown error reading the data from the k8s_client.
+    """
+    if len(charts_deleted_nexus) == 0:
+        raise ProductInstallException(
+            f"No charts to delete from cray-product-catalog ConfigMap.")
+
+    try:
+        config_map: V1ConfigMap = k8s_client.read_namespaced_config_map(
+            PRODUCT_CATALOG_CONFIG_MAP_NAME, PRODUCT_CATALOG_CONFIG_MAP_NAMESPACE)  # type: ignore
+    except MaxRetryError as err:
+        raise ProductInstallException(
+            f'Unable to connect to Kubernetes to read {PRODUCT_CATALOG_CONFIG_MAP_NAME}/{product_name} ConfigMap: {err}'
+        )
+    except ApiException as err:
+        raise ProductInstallException(
+            f'Error reading {PRODUCT_CATALOG_CONFIG_MAP_NAME}/{product_name} ConfigMap: {err.reason}'
+        )
+    if config_map.data is None:
+        raise ProductInstallException(
+            f'No data found in {PRODUCT_CATALOG_CONFIG_MAP_NAME}/{product_name} ConfigMap.'
+        )
+
+    # Get product data
+    try:
+        config_map.data[product_name]
+    except KeyError:
+        raise ProductInstallException(
+            f'No ConfigMap data found for {product_name}'
+        )
+
+    # Load the yaml data from the ConfigMap
+    product_data: dict = safe_load(config_map.data[product_name])
+    try:
+        product_charts: list[HelmChartDict] = product_data[product_version][COMPONENT_VERSIONS_PRODUCT_MAP_KEY][COMPONENT_HELM_KEY]
+    except KeyError:
+        raise ProductInstallException(
+            f"There are no helm charts located in the product catalog configmap for '{product_name}:{product_version}'")
+
+    # Delete from the local configmap (NxM in best case N^2 in worst) have to find chart name in list of dictionaries.
+    for chart in charts_deleted_nexus:
+        name, version, component_id = chart
+        print(f"Attempting to delete chart {name}:{version}:{component_id}")
+        for idx, chart_dict in enumerate(product_charts):
+            if name == chart_dict['name']:
+                del product_charts[idx]
+                break
+
+    # set new chart data
+    product_data[product_version][COMPONENT_VERSIONS_PRODUCT_MAP_KEY][COMPONENT_HELM_KEY] = product_charts
+    config_map.data[product_name] = product_data
+    return config_map
 
 
 class ProductInstallException(Exception):
@@ -150,8 +249,10 @@ class ProductCatalog:
 
         self.docker_api = DockerApi(DockerClient(docker_url))
         self.nexus_api = NexusApi(NexusClient(nexus_url))
+        self.helm_charts_deleted_nexus: NexusHelmChartTuples = list()
         try:
-            config_map = self.k8s_client.read_namespaced_config_map(name, namespace)
+            config_map = self.k8s_client.read_namespaced_config_map(
+                name, namespace)
         except MaxRetryError as err:
             raise ProductInstallException(
                 f'Unable to connect to Kubernetes to read {namespace}/{name} ConfigMap: {err}'
@@ -167,9 +268,20 @@ class ProductCatalog:
                 f'No data found in {namespace}/{name} ConfigMap.'
             )
 
+        # Get nexus charts data, since the entire list must be acquired only make this call once.
+        # nexus delete API requires a component id
+        # Each InstalledProduct must have the all the chart components to find the respective charts.
+        try:
+            nexus_charts = self.nexus_api.components.list("charts")
+        except HTTPError as err:
+            raise ProductInstallException(
+                f"Failed to load Nexus components for 'charts' repository: {err}"
+            )
+
         try:
             self.products = [
-                InstalledProductVersion(product_name, product_version, product_version_data)
+                InstalledProductVersion(
+                    product_name, product_version, product_version_data, nexus_charts)
                 for product_name, product_versions in config_map.data.items()
                 for product_version, product_version_data in safe_load(product_versions).items()
             ]
@@ -248,6 +360,52 @@ class ProductCatalog:
 
         return matching_products[0]
 
+    def remove_helm_charts(self, name: str, version: str) -> None:
+        """
+        Remove a product's Helm charts.
+        
+        This function will remove helm charts that are tied to a certain product
+        through the kubernetes api and nexus storage. This also tracks which
+        charts are successfully removed from nexus.
+
+        Args:
+            name (str): The name of the product for which to remove helm charts.
+            version (str): The version of the product for which to remove helm charts.
+        """
+        product: InstalledProductVersion = self.get_product(name, version)
+        k8s_charts: Optional[NexusHelmChartTuples] = product.get_helm_chart_nexus_component_ids()
+
+        if not k8s_charts:
+            print(f"No helm charts found to remove for {name}:{version}")
+            return
+
+        for chart in k8s_charts:
+            chart_name, chart_version, component_id = chart
+            try:
+                uninstall_nexus_helm_chart(
+                    chart_name, chart_version, component_id, self.nexus_api)
+                self.helm_charts_deleted_nexus.append(chart)
+            except ProductInstallException as err:
+                print(
+                    f'Failed to remove chart {chart_name}:{chart_version} from {name}:{version}: {err}')
+
+        # Remove from K8s configmap.
+        try:
+            updated_config_map: V1ConfigMap = uninstall_k8_helm_charts(name,
+                                                                       version,
+                                                                       self.helm_charts_deleted_nexus,
+                                                                       self.k8s_client)
+        except ProductInstallException as err:
+            print(f'Failed to remove helm charts from the ConfigMap: {err}')
+            raise err
+
+        # Update the catalog ConfigMap with cray-product-catalog (catalog_update.py)
+        try:
+            self.update_product_data(name, version, updated_config_map.data[name][version])
+        except ProductInstallException as err:
+            print(f'Failed to update helm charts in the ConfigMap: {err}')
+            raise err
+
     def remove_product_docker_images(self, name, version):
         """Remove a product's Docker images.
 
@@ -288,9 +446,11 @@ class ProductCatalog:
                       f'{", ".join(str(p) for p in other_products_with_same_docker_image)}')
             else:
                 try:
-                    uninstall_docker_image(image_name, image_version, self.docker_api)
+                    uninstall_docker_image(
+                        image_name, image_version, self.docker_api)
                 except ProductInstallException as err:
-                    print(f'Failed to remove {image_name}:{image_version}: {err}')
+                    print(
+                        f'Failed to remove {image_name}:{image_version}: {err}')
                     errors = True
 
         if errors:
@@ -412,6 +572,44 @@ class ProductCatalog:
                 f'Error removing {name}-{version} from product catalog: {err}'
             )
 
+    def update_product_data(self, name: str, version: str, updated_product_data: dict[Any, Any]) -> None:
+        """
+        Function to update the cray-product-catalog ConfigMap using
+        the `catalog_update.py` in cray-product-catalog.
+
+        Args:
+            name (str): The name of the product to update.
+            version (str): The version of the product to update.
+            updated_product_data (dict): The updated product data configmap in dict format.
+
+        Raises:
+            ProductInstallException: If an error occurred updating the ConfigMap.
+        """
+        with NamedTemporaryFile(mode='w') as temp_file:
+            # Use os.environ so that PATH and VIRTUAL_ENV are used
+            # Note: reading the file using temporary_file.name while the file
+            # is already open does not work on Windows.
+            # See: https://docs.python.org/3/library/tempfile.html#tempfile.NamedTemporaryFile
+            temp_file.write(safe_dump(updated_product_data))
+            temp_file.flush()
+            os.environ.update({
+                'PRODUCT': name,
+                'PRODUCT_VERSION': version,
+                'CONFIG_MAP': self.name,
+                'CONFIG_MAP_NS': self.namespace,
+                'SET_ACTIVE_VERSION': 'true',
+                'VALIDATE_SCHEMA': 'true',
+                'UPDATE_OVERWRITE': 'true',
+                'YAML_CONTENT': temp_file.name
+            })
+            try:
+                subprocess.check_output(['catalog_update'])
+                print(f'Updated {name}-{version} in the product catalog with new product data.')
+            except subprocess.CalledProcessError as err:
+                raise ProductInstallException(
+                    f'Error activating {name}-{version} in product catalog: {err}'
+                )
+
 
 class InstalledProductVersion:
     """A representation of a version of a product that is currently installed.
@@ -423,11 +621,15 @@ class InstalledProductVersion:
               version in the product catalog, which is expected to contain a
               'component_versions' key that will point to the respective
               versions of product components, e.g. Docker images.
+        nexus_charts: A model of the nexus API response of the components API.
+                      See nexusctl.nexus.models.ComponentXO for more info.
     """
-    def __init__(self, name, version, data):
+
+    def __init__(self, name, version, data, nexus_charts):
         self.name = name
         self.version = version
-        self.data = data
+        self.data: dict[Any, Any] = data
+        self.nexus_charts: PageComponentXO = nexus_charts
 
     def __str__(self):
         return f'{self.name}-{self.version}'
@@ -458,6 +660,19 @@ class InstalledProductVersion:
 
         return [(component['name'], component['version'])
                 for component in component_data.get(COMPONENT_DOCKER_KEY) or []]
+
+    @property
+    def helm_charts(self) -> HelmChartTuples:
+        """Get Helm charts associated with this InstalledProductVersion.
+        
+        Returns:
+            A list of tuples of (chart_name, chart_version) `HelmChartTuples`
+        """
+        component_data: dict[Any, Any] = self.data.get(
+            COMPONENT_VERSIONS_PRODUCT_MAP_KEY, {})
+
+        return [(component['name'], component['version'])
+                for component in component_data.get(COMPONENT_HELM_KEY) or []]
 
     @property
     def _deprecated_docker_image_version(self):
@@ -531,7 +746,7 @@ class InstalledProductVersion:
         return configuration and configuration['clone_url']
 
     @staticmethod
-    def _get_repo_by_name(nexus_api, name):
+    def _get_repo_by_name(nexus_api: NexusApi, name: str) -> Union[RepoListHostedEntry, RepoListGroupEntry]:
         """Get a repository with the specified name.
 
         Args:
@@ -550,7 +765,7 @@ class InstalledProductVersion:
             repos_matching_name = nexus_api.repos.list(regex=f'^{name}$')
             if len(repos_matching_name) > 1:
                 raise ProductInstallException(f'More than one repository named {name} found.')
-            return repos_matching_name[0]
+            return repos_matching_name[0] # type: ignore
         except IndexError:
             raise ProductInstallException(f'No repository named {name} found.')
         except HTTPError as err:
@@ -628,3 +843,29 @@ class InstalledProductVersion:
             raise ProductInstallException(
                 f'One or more errors occurred uninstalling repositories for {self.name} {self.version}.'
             )
+
+    def get_helm_chart_nexus_component_ids(self) -> Optional[NexusHelmChartTuples]:
+        """
+        Maps the names of the helm charts found in the configmap which contain (name, version).
+        Nexus delete API requires that the component_id. This method searches the entire charts
+        repository for the products helm charts and returns a list of Tuples that contain:
+        (name, version, component_id). NexusHelmChartTuples
+
+        Returns:
+            Optional[NexusHelmChartTuples]: List of Tuples (name: str, version: str, component_id: str)
+        """
+        charts_to_find: HelmChartTuples = self.helm_charts
+        if not charts_to_find:
+            print(
+                f"No helm charts found in the configmap data for {self.name}:{self.version}")
+            return
+
+        matches: NexusHelmChartTuples = list()
+        for chart_tuple in charts_to_find:
+            name, version = chart_tuple
+            for component in self.nexus_charts.components:
+                if component.name == name and component.version == version:
+                    matches.append((name, version, component.id))
+                    break
+
+        return matches
