@@ -24,7 +24,7 @@
 
 # Top-level requirements for shasta-install-utility-common
 
-cray-product-catalog==1.8.5
+cray-product-catalog==1.8.9
 nexusctl >= 1.1.1, < 2.0
 jsonschema >=3.2.0, < 4.0
 kubernetes >= 11.0, < 12.0
