@@ -1,7 +1,7 @@
 #
 # MIT License
 #
-# (C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP
+# (C) Copyright 2021-2023 Hewlett Packard Enterprise Development LP
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -29,7 +29,6 @@ from base64 import b64decode
 import os
 import subprocess
 from tempfile import NamedTemporaryFile
-import warnings
 
 from cray_product_catalog.schema.validate import validate
 from jsonschema.exceptions import ValidationError
@@ -40,7 +39,7 @@ from nexusctl import DockerApi, DockerClient, NexusApi, NexusClient
 from nexusctl.common import DEFAULT_DOCKER_REGISTRY_API_BASE_URL, DEFAULT_NEXUS_API_BASE_URL
 from urllib3.exceptions import MaxRetryError
 from urllib.error import HTTPError
-from yaml import safe_load, safe_dump, YAMLError, YAMLLoadWarning
+from yaml import safe_load, safe_dump, YAMLError
 
 
 from shasta_install_utility_common.constants import (
@@ -114,9 +113,7 @@ class ProductCatalog:
                 Kubernetes configuration.
         """
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=YAMLLoadWarning)
-                load_kube_config()
+            load_kube_config()
             return CoreV1Api()
         except ConfigException as err:
             raise ProductInstallException(f'Unable to load kubernetes configuration: {err}.')
