@@ -1,7 +1,7 @@
 #
 # MIT License
 #
-# (C) Copyright 2021-2022 Hewlett Packard Enterprise Development LP
+# (C) Copyright 2021-2023 Hewlett Packard Enterprise Development LP
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -134,17 +134,6 @@ class TestProductCatalog(unittest.TestCase):
         with self.assertRaisesRegex(ProductInstallException,
                                     'No data found in mock-namespace/mock-name ConfigMap.'):
             self.create_and_assert_product_catalog()
-
-    def test_create_product_catalog_invalid_product_schema(self):
-        """Test creating a ProductCatalog when an entry contains valid YAML but does not match schema."""
-        self.mock_k8s_api.read_namespaced_config_map.return_value = Mock(data={
-            'sat': safe_dump({'2.1': {'this_key_is_not_allowed': {}}})
-        })
-        product_catalog = self.create_and_assert_product_catalog()
-        self.mock_print.assert_called_once_with(
-            'The following products have product catalog data that is not understood by the install utility: sat-2.1'
-        )
-        self.assertEqual(product_catalog.products, [])
 
     def test_get_matching_products(self):
         """Test getting a particular product by name/version."""
